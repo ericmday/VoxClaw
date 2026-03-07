@@ -1,0 +1,8 @@
+## Codebase Patterns
+
+(Patterns will be added here as Ralph discovers them during implementation)
+
+---
+
+# Progress Log
+

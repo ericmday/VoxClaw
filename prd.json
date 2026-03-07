@@ -1,0 +1,207 @@
+{
+  "projectName": "Loom Voice iOS",
+  "description": "Native iOS voice assistant client. Forked from VoxClaw — strip TTS/teleprompter, add LiveKit bidirectional voice with background audio persistence. Connects to existing always_on_voice.py server.",
+  "branchName": "main",
+  "techStack": "Swift 6.2, SwiftUI, iOS 17+, LiveKit Swift SDK 2.12+, Swift Package Manager",
+  "userStories": [
+    {
+      "id": "LOOM-001",
+      "title": "Strip VoxClaw to Clean iOS Shell",
+      "priority": 1,
+      "passes": false,
+      "description": "Remove all VoxClaw-specific code (TTS services, teleprompter, HTTP listener, overlay, CLI, macOS target) to create a clean iOS app shell.",
+      "acceptanceCriteria": [
+        "Remove Sources/VoxClawCore/Audio/ (TTSService, ElevenLabsTTSService, FallbackSpeechEngine, AppleSpeechEngine, AudioPlayer and any other TTS files)",
+        "Remove Sources/VoxClawCore/Reading/ (ReadingSession, WordTimingEstimator, SpeechAligner and related files)",
+        "Remove Sources/VoxClawCore/Network/NetworkListener.swift, NetworkSession.swift, HTTPRequestParser.swift",
+        "Remove Sources/VoxClawCore/Panel/ (FloatingPanel, PanelController — macOS overlay)",
+        "Remove Sources/VoxClawCore/Input/CLIParser.swift and ModeDetector.swift",
+        "Remove Sources/VoxClawCore/Input/InputResolver.swift if it exists",
+        "Keep PeerBrowser.swift (Bonjour discovery — will adapt later)",
+        "Keep KeychainHelper.swift (will repurpose)",
+        "Keep SettingsManager.swift (will modify in later story)",
+        "Keep AppState.swift (will rewrite in later story)",
+        "Keep Log.swift (logging utility)",
+        "Remove macOS-specific views and code paths",
+        "Update Package.swift — remove macOS platform, keep iOS 17+ only",
+        "Remove VoxClawCore executable target, keep library target",
+        "Update VoxClawIOS app to import from cleaned library",
+        "Remove all VoxClaw tests that test removed functionality",
+        "App builds for iOS simulator without errors",
+        "App launches on simulator (blank/minimal screen is fine)"
+      ]
+    },
+    {
+      "id": "LOOM-002",
+      "title": "LiveKit SDK + Room Connection",
+      "priority": 2,
+      "passes": false,
+      "description": "Add LiveKit Swift SDK and implement room connection via token endpoint. The app should connect to the existing Loom server's LiveKit room and publish/subscribe audio.",
+      "acceptanceCriteria": [
+        "Add LiveKit client-sdk-swift (>= 2.12.1) as Swift Package dependency",
+        "Create Managers/RoomManager.swift — @Observable class, @MainActor isolated",
+        "RoomManager has ConnectionState enum: .disconnected, .connecting, .connected, .reconnecting(attempt:), .failed(Error)",
+        "Create Managers/ServerAPI.swift with fetchToken(deviceId:) async throws -> TokenResponse",
+        "Create Models/TokenResponse.swift — Codable struct for { token, url, room, version }",
+        "Create Models/HealthResponse.swift — Codable struct for /health response",
+        "Device ID is a stable UUID stored in @AppStorage(\"deviceId\"), generated on first launch",
+        "On connect: fetch token from GET /token?deviceId=<uuid>, then room.connect(url:token:)",
+        "Configure RoomOptions with AudioCaptureOptions(echoCancellation: true, noiseSuppression: true, autoGainControl: true)",
+        "Configure AudioPublishOptions(dtx: true) for bandwidth savings",
+        "Implement RoomDelegate for connection state changes (didUpdateConnectionState)",
+        "Implement RoomDelegate for track subscription (didSubscribeTrack)",
+        "Auto-publish microphone on connect: room.localParticipant.setMicrophone(enabled: true)",
+        "Server URL defaults to https://erics-macbook-pro.tail893ab1.ts.net:8089 (stored in @AppStorage)",
+        "LiveKit URL comes from token response, not hardcoded",
+        "Basic UI showing connection state (connected/disconnected text is fine)",
+        "App compiles and builds for iOS"
+      ]
+    },
+    {
+      "id": "LOOM-003",
+      "title": "Audio Session + Background Persistence",
+      "priority": 3,
+      "passes": false,
+      "description": "Configure AVAudioSession and background modes so the voice connection survives backgrounding, interruptions, and audio route changes.",
+      "acceptanceCriteria": [
+        "Info.plist: UIBackgroundModes includes 'audio' and 'voip'",
+        "Info.plist: NSMicrophoneUsageDescription set to meaningful string",
+        "Create Managers/AudioSessionManager.swift",
+        "Let LiveKit SDK manage AVAudioSession automatically (isAutomaticConfigurationEnabled = true)",
+        "Enable setRecordingAlwaysPreparedMode(true) for instant mic availability",
+        "Set duckingLevel = .min to minimize ducking other audio",
+        "Set mic mute mode to .voiceProcessing (fast mute, no audio engine restart)",
+        "Handle AVAudioSession.interruptionNotification — began and ended cases",
+        "On interruption ended with .shouldResume: reactivate audio session",
+        "Handle AVAudioSession.routeChangeNotification for headphone/BT changes",
+        "Create Utilities/BackgroundKeepAlive.swift — play inaudible tone every 90s if no audio activity (insurance against iOS killing background audio)",
+        "Audio session configured before LiveKit room.connect() is called"
+      ]
+    },
+    {
+      "id": "LOOM-004",
+      "title": "Reconnection State Machine",
+      "priority": 4,
+      "passes": false,
+      "description": "Implement automatic reconnection with exponential backoff and network transition handling so the app recovers from drops without user intervention.",
+      "acceptanceCriteria": [
+        "Create ReconnectPolicy struct: initialDelay 0.5s, maxDelay 30s, backoffMultiplier 1.5, maxAttempts 20, jitter ±30%",
+        "Create Utilities/NetworkMonitor.swift wrapping NWPathMonitor",
+        "On disconnect from RoomDelegate: start reconnect loop with exponential backoff",
+        "Each reconnect attempt: check /health endpoint first, only attempt room.connect if server is up",
+        "On NWPathMonitor path change (WiFi↔cell): immediately attempt reconnect, reset backoff counter",
+        "Fetch fresh token on each reconnect attempt (token may have expired)",
+        "Cancel reconnect loop on successful connect",
+        "After max attempts exhausted: set connectionState to .failed",
+        "LiveKit SDK built-in reconnect handles ICE restarts; our loop is the fallback layer on top",
+        "RoomManager.startReconnectLoop() uses structured concurrency (Task, cancellation)",
+        "Reconnect task is properly cancelled when room connects or app disconnects intentionally"
+      ]
+    },
+    {
+      "id": "LOOM-005",
+      "title": "Orb View + Main Voice UI",
+      "priority": 5,
+      "passes": false,
+      "description": "Create the main voice-first UI with an animated orb that communicates connection state and speaking activity visually.",
+      "acceptanceCriteria": [
+        "Create Views/VoiceView.swift — main screen with orb centered, settings gear top-right, status bottom bar",
+        "Create Views/OrbView.swift — animated orb using TimelineView + Canvas",
+        "Orb states with distinct colors: idle (slate gray), listening (slate gray subtle pulse), thinking (soft blue), speaking (warm amber, audio-reactive), disconnected (red static), muted (dimmed + slash overlay)",
+        "Orb breathing animation: slow sine wave modulating radius (~1.5 Hz cycle)",
+        "Orb audio reactivity when speaking: map RemoteTrackPublication.audioLevel to radius delta",
+        "Detect Loom speaking via remote participant's audio track level > threshold",
+        "'Loom' label below orb",
+        "Tap orb toggles mute with haptic feedback (UIImpactFeedbackGenerator, medium)",
+        "Bottom bar: mute button + connection status dot (green connected, yellow reconnecting, red disconnected)",
+        "Dark mode only — dark background, no light mode support needed",
+        "SF Symbols for all icons, system typography (SF Pro)",
+        "VoiceView receives RoomManager as @EnvironmentObject or @Environment",
+        "App entry point (LoomVoiceApp.swift or equivalent) creates RoomManager and injects into view hierarchy"
+      ]
+    },
+    {
+      "id": "LOOM-006",
+      "title": "Settings Screen",
+      "priority": 6,
+      "passes": false,
+      "description": "Create a settings screen for server URL configuration and connection status display.",
+      "acceptanceCriteria": [
+        "Create Views/SettingsView.swift with NavigationStack",
+        "CONNECTION section: server URL (editable TextField), connection status indicator, room name, latency if available",
+        "AUDIO section: push-to-talk toggle (@AppStorage), always-on mic toggle",
+        "ABOUT section: app version (from bundle), server version (from /health response)",
+        "Settings gear icon on VoiceView top-right navigates to SettingsView",
+        "Server URL changes trigger disconnect and reconnect with new URL",
+        "Default server URL pre-filled: https://erics-macbook-pro.tail893ab1.ts.net:8089",
+        "Rewrite SettingsManager.swift to hold Loom Voice settings instead of VoxClaw TTS settings",
+        "Settings persist via @AppStorage / UserDefaults"
+      ]
+    },
+    {
+      "id": "LOOM-007",
+      "title": "Mute + Push-to-Talk",
+      "priority": 7,
+      "passes": false,
+      "description": "Implement microphone mute toggle and optional push-to-talk mode for noisy environments.",
+      "acceptanceCriteria": [
+        "Mute toggle calls room.localParticipant.setMicrophone(enabled:)",
+        "Mute state reflected in orb (dimmed appearance + slash overlay)",
+        "Haptic feedback on mute toggle (medium impact)",
+        "Push-to-talk mode: long-press orb to unmute, release to re-mute",
+        "Push-to-talk preference stored in @AppStorage",
+        "When push-to-talk enabled, mic starts muted, subtle 'hold to talk' hint shown",
+        "Normal mode (always-on mic) is the default"
+      ]
+    },
+    {
+      "id": "LOOM-008",
+      "title": "Local Disconnect Notifications",
+      "priority": 8,
+      "passes": false,
+      "description": "Fire local notifications when connection drops so the user knows to reopen the app.",
+      "acceptanceCriteria": [
+        "Create Managers/NotificationManager.swift",
+        "Request UNUserNotificationCenter authorization on first launch",
+        "Fire local notification when reconnect fails after 3 attempts",
+        "Notification: title 'Loom Voice', body 'Connection lost. Tap to reconnect.'",
+        "Tapping notification opens the app",
+        "Rate limit: max 1 disconnect notification per 5 minutes",
+        "Clear pending notifications when app successfully reconnects"
+      ]
+    },
+    {
+      "id": "LOOM-009",
+      "title": "Adapt Bonjour Discovery",
+      "priority": 9,
+      "passes": false,
+      "description": "Adapt VoxClaw's PeerBrowser to discover Loom Voice servers on the local network.",
+      "acceptanceCriteria": [
+        "Modify PeerBrowser.swift to browse for _loom-voice._tcp instead of _voxclaw._tcp",
+        "Remove OpenClaw discovery (_openclaw._tcp) from PeerBrowser",
+        "Update PeerApp enum to .loomVoice instead of .voxclaw",
+        "When a Loom server is discovered on LAN, surface it in Settings as a connection option",
+        "If no saved URL and Bonjour finds a server, auto-connect to it",
+        "Bonjour is secondary to saved URL (don't override user manual config)",
+        "Info.plist: NSLocalNetworkUsageDescription and NSBonjourServices set for _loom-voice._tcp"
+      ]
+    },
+    {
+      "id": "LOOM-010",
+      "title": "Rebrand to Loom Voice",
+      "priority": 10,
+      "passes": false,
+      "description": "Rebrand the app from VoxClaw to Loom Voice — update bundle ID, names, icons, and remove VoxClaw references.",
+      "acceptanceCriteria": [
+        "Bundle identifier changed to com.ericday.loomvoice",
+        "App display name: Loom Voice",
+        "All code references to VoxClaw renamed to LoomVoice (module names, types, comments)",
+        "Remove VoxClaw README.md, SKILL.md, docs/ directory",
+        "Remove VoxClaw GitHub links from any remaining views",
+        "Update version to 1.0.0 in version.env",
+        "App icon — use a placeholder SF Symbol-based icon or simple 🪡 glyph rendered as icon",
+        "App builds and runs with new identity"
+      ]
+    }
+  ]
+}

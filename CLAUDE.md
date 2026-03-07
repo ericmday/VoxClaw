@@ -1,103 +1,105 @@
-# VoxClaw - Claude Code Project Notes
+# Loom Voice iOS — Claude Code Project Notes
 
-## What it is
+## What This Is
 
-macOS menu bar app + CLI tool (SwiftPM, no Xcode) that reads text aloud using Apple TTS (default) or OpenAI TTS (optional BYOK). Shows a teleprompter-style floating overlay with synchronized word highlighting.
+Native iOS voice assistant client forked from VoxClaw. Connects to an existing Python voice server (`always_on_voice.py`) via LiveKit for bidirectional voice communication. The server handles all the intelligence (STT → Claude → TTS). This app is just the native iOS client: mic in, speaker out, stay alive in background.
 
-**Bundle ID:** `com.malpern.voxclaw`
-**URL scheme:** `voxclaw://read?text=...`
-**CLI command:** `voxclaw`
+**Bundle ID:** `com.ericday.loomvoice`
+**Platform:** iOS 17+
+**Package Manager:** Swift Package Manager (no Xcode project file)
+
+## What We Forked From
+
+This was VoxClaw — a macOS text-to-speech teleprompter app. We're keeping:
+- Project structure (SPM)
+- `PeerBrowser.swift` (Bonjour discovery — adapting service type)
+- `KeychainHelper.swift` (secure storage)
+- `SettingsManager.swift` (settings persistence pattern)
+- `Log.swift` (logging)
+- iOS app target (`VoxClawIOS/`)
+
+We're removing all TTS, teleprompter, HTTP listener, overlay, CLI, and macOS code.
 
 ## Architecture
 
-- **Single binary**, dual-mode: CLI or menu bar app depending on how it's launched (`ModeDetector`)
-- **SpeechEngine protocol** abstracts Apple TTS (`AppleSpeechEngine`) and OpenAI TTS (`OpenAISpeechEngine`)
-- **Distribution:** GitHub Releases (ad-hoc signed, or Developer ID for no-Gatekeeper-warning)
-- **Packaging:** `Scripts/package_app.sh` (ad-hoc signed by default)
+```
+iOS App (LiveKit client)
+  ├── RoomManager (@Observable) — owns LiveKit Room, publishes state
+  ├── ServerAPI — HTTP client for /token, /health, /model, /tts, /interrupt
+  ├── AudioSessionManager — AVAudioSession config + interruption handling
+  ├── ConnectionManager — reconnection state machine + NWPathMonitor
+  ├── NotificationManager — local notifications on disconnect
+  └── Views (SwiftUI)
+      ├── VoiceView — main screen with animated orb
+      ├── OrbView — Canvas-based animated orb (state-driven, audio-reactive)
+      └── SettingsView — server URL, audio prefs, connection status
+
+Server (DO NOT MODIFY — already exists)
+  ├── LiveKit room "loom-voice" on wss://....:7880
+  ├── HTTP on https://....:8089
+  │   ├── GET /token?deviceId=<uuid>
+  │   ├── GET /health
+  │   ├── POST /model
+  │   ├── POST /tts
+  │   └── POST /interrupt
+  └── STT (Whisper) → LLM (Claude) → TTS (Kokoro)
+```
 
 ## Build & Test
 
 ```bash
-swift build                    # Debug build
-swift test                     # 75 tests
-Scripts/compile_and_run.sh     # Build, package, and launch (dev loop)
-Scripts/package_app.sh release # Release build (ad-hoc signed)
-APP_IDENTITY="Developer ID Application: ..." Scripts/package_app.sh release  # Signed
+swift build                              # Debug build (iOS simulator)
+swift test                               # Run remaining tests
+xcodebuild -scheme VoxClawIOS -sdk iphonesimulator build   # Full iOS build
 ```
 
-## Integration Methods
+Note: The Xcode scheme name may still say VoxClawIOS until Story 10 (rebrand).
+
+## Key Dependencies
+
+- **LiveKit Swift SDK** (`client-sdk-swift` >= 2.12.1) — WebRTC room, audio tracks
+- No other external dependencies for MVP
+
+## Server Endpoints (Reference — DO NOT MODIFY SERVER)
 
 ```bash
-# URL scheme
-open "voxclaw://read?text=Hello%20world"
+# Get LiveKit token
+curl https://erics-macbook-pro.tail893ab1.ts.net:8089/token?deviceId=<uuid>
+# Response: { "token": "...", "url": "wss://...", "room": "loom-voice", "version": "0.4.4" }
 
-# Services menu
-# Select text > right-click > Services > Read with VoxClaw
+# Health check
+curl https://erics-macbook-pro.tail893ab1.ts.net:8089/health
+# Response: { "status": "ok", "room": "loom-voice", "participants": [...] }
 
-# Shortcuts CLI
-shortcuts run "Read with VoxClaw" --input-string "Hello world"
+# Switch LLM model
+curl -X POST .../model -d '{"model": "claude-haiku"}'
 
-# Network listener (toggle in Settings or --listen flag)
-curl -X POST http://localhost:4140/read -d '{"text":"Hello"}'
-curl -X POST http://localhost:4140/read -H 'Content-Type: application/json' -d '{"text":"Hello"}'
-curl http://localhost:4140/status
+# Switch TTS engine
+curl -X POST .../tts -d '{"engine": "kokoro", "voice": "bella"}'
+
+# Interrupt current TTS
+curl -X POST .../interrupt
 ```
-
-## CLI Usage
-
-```bash
-voxclaw "Hello, world!"              # Read text aloud
-voxclaw -a "Hello"                   # Audio only (no overlay)
-voxclaw --clipboard                  # Read from clipboard
-voxclaw --file article.txt           # Read from file
-echo "Hello" | voxclaw              # Read from stdin
-voxclaw --voice nova "Hello"         # OpenAI voice override
-voxclaw --rate 1.5 "Hello"          # 1.5x speech speed
-voxclaw --instructions "Read warmly" "Hello"  # OpenAI prosody control
-voxclaw --output hello.mp3 "Hello"  # Save audio to file (OpenAI)
-voxclaw --listen                     # Start HTTP listener on port 4140
-voxclaw --listen --port 8080         # Custom port
-voxclaw --send "Hello"              # Send text to running listener
-voxclaw --status                     # Check if listener is running
-```
-
-## Design Principles
-
-- **Audio leads, visuals follow.** The voice sets the pace and tone of the experience. The overlay exists to support the audio, not the other way around. Never show the overlay before audio is ready to play. Don't let visual elements (loading states, animations, transitions) compete with or distract from the spoken word.
 
 ## Key Conventions
 
-- Tests use Swift Testing framework (`@Test`, `#expect`)
-- Network integration tests are `@Suite(.serialized)` to avoid port conflicts
+- **@Observable** on state classes (RoomManager, etc.) — use stored properties with didSet, not computed
+- **@MainActor** on anything that drives UI
+- **Structured concurrency** — use Task, async/await, proper cancellation
+- **SF Symbols** for all icons — no custom image assets
+- **Dark mode only** for MVP
+- **iOS 17+ minimum** — can use latest SwiftUI features
+- Tests use Swift Testing framework (`@Test`, `#expect`) where applicable
 - Logging via `os.Logger` categories in `Log.swift`
-- API key storage: `KeychainHelper` — checks `OPENAI_API_KEY` env var first, then `~/Library/Application Support/VoxClaw/api-key`
-  - File has `0600` permissions (owner read/write only)
-  - One-time migration from Keychain happens automatically on first launch after upgrade
-- `@Observable` on `AppState` and `SettingsManager` — use stored properties with `didSet`, not computed, because `@Observable` can't track computed properties
 
-## Logging
+## Important iOS Notes
 
-```bash
-log stream --predicate 'subsystem == "com.malpern.voxclaw"' --level debug
-```
+- `UIBackgroundModes: audio, voip` in Info.plist for background persistence
+- Let LiveKit SDK manage AVAudioSession (`isAutomaticConfigurationEnabled = true`)
+- Handle `AVAudioSession.interruptionNotification` for phone calls / Siri
+- Use `NWPathMonitor` for network transition detection (WiFi ↔ cell)
+- Token endpoint is unauthenticated — Tailscale network IS the auth boundary
 
-## Release Workflow
+## Codebase Patterns
 
-Push a tag (e.g. `v1.0.0`) → `.github/workflows/release.yml` builds, packages, uploads `VoxClaw.zip` to GitHub Releases.
-
-## Project Structure
-
-```
-Sources/
-  VoxClawCore/    Library target (all logic)
-  VoxClaw/        Thin executable (main.swift → VoxClawLauncher.main())
-Tests/
-  VoxClawCoreTests/   75+ tests
-Scripts/
-  compile_and_run.sh  Kill → build → package → launch (dev loop)
-  package_app.sh      Build .app bundle
-  install-cli.sh      Symlink voxclaw binary to /usr/local/bin
-docs/
-  privacy.html        https://malpern.github.io/VoxClaw/privacy.html
-  index.html
-```
+(Ralph will populate this as patterns are discovered during implementation)
